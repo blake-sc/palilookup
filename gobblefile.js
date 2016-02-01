@@ -1,49 +1,53 @@
 var gobble = require( 'gobble' );
-var babel = require('rollup-plugin-babel');
+var rollupBabel = require('rollup-plugin-babel');
 var npm = require('rollup-plugin-npm');
 var commonjs = require('rollup-plugin-commonjs');
 
 
-var rollupSettings = {
-  format: 'es6',
-  sourceMap: true,
-  plugins: [
-    npm({
-      jsnext: true,
-      main: true,
-      skip: []
-    }),
-    commonjs(),
-    babel({
-      babelrc: false,
-      compact: false,
-      "presets": [ "es2015-rollup"],
-      "plugins": [
-        "syntax-async-functions",
-        "transform-async-to-generator"
-      ]
-    })
-  ]
+function rollupSettings() {
+  return{
+    format: 'es6',
+    sourceMap: true,
+    plugins: [
+      npm({
+        jsnext: true,
+        main: true,
+        skip: []
+      }),
+      commonjs(),
+      rollupBabel({
+        babelrc: false,
+        compact: false,
+        "presets": [ "es2015-rollup"],
+        "plugins": [
+          "syntax-function-bind",
+          "syntax-async-functions",
+          "transform-async-to-generator",
+          "transform-function-bind"
+        ]
+      })
+    ]
+  }
 }
 
 module.exports = gobble([
     gobble('src/root'),
-    gobble( 'src/styles' ).transform('sass', {
-        'src': 'main.scss',
-        'dest': 'main.css'
+    gobble( 'src/styles').transform('sass', {
+      'src': 'lookup.scss',
+      'dest': 'lookup.css'
     }),
     gobble('src/js')
-      .transform('rollup', Object.assign({}, rollupSettings,
+      .transform('rollup', Object.assign(rollupSettings(),
                                          {
-                                           entry: 'app.es6',
-                                           dest: 'app.js'
+                                           entry: 'lookup-utility.es6',
+                                           dest: 'lookup-utility.js'
                                          })
       ),//.transform('uglifyjs'),
       gobble('src/js')
-        .transform('rollup', Object.assign({}, rollupSettings,
+        .transform('rollup', Object.assign(rollupSettings(),
                                            {
-                                             entry: 'worker.es6',
-                                             dest: 'worker.js'
+                                             entry: 'lookup-worker-backend.es6',
+                                             dest: 'lookup-worker.js'
                                            })
         )//.transform('uglifyjs')
     ]);

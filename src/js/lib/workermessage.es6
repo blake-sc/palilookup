@@ -1,8 +1,10 @@
+
 var callbacks = new Map();
 var next_msg_id = 1;
 var listeners = new Map();
 
 function handleMessage(event) {
+  "use strict";
   let result = event.data.result;
   let msg_id = event.data.id;
   let worker = event.target;

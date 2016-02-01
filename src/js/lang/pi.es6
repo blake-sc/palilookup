@@ -330,4 +330,10 @@ export function conjugate(word) {
   return [...results]
 }
 
-export default {conjugate}
+export const charRex = /(?:[aiueoāīū]|br|[kgcjtṭdḍbp]h|[kgcjtṭdḍp](?!h)|[mnyrlvshṅṇṃṃñḷ]|b(?![rh]))/ig;
+
+export function sanitizeTerm(term) {
+  return term.replace(/n[”’]+ti$/, 'ṃ').replace(/[”’]+.*$/, '');
+}
+
+export default {conjugate, sanitizeTerm, charRex};

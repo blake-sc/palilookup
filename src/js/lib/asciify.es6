@@ -53,9 +53,9 @@ for (let chars of data) {
 export function asciify(string, defaultChar){
     if (defaultChar === undefined)
         defaultChar = '';
-    return string.replace(/[\u007f-\uffff]/g, (t) => {asciifyMap[t] || defaultChar});
+    return string.replace(/[\u007f-\uffff]/g, t => asciifyMap[t] || defaultChar);
 }
 // The inverse of the above, allows a regex to match unicode equivs.
 export function unifyRegexPattern(string){
-    return string.replace(/[ -~]/g, (t) => {'[' + t + (unifyMap[t] || '') + ']'});
+    return string.replace(/[ -~]/g, t => '[' + t + (unifyMap[t] || '') + ']');
 }

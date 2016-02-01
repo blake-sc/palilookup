@@ -4,17 +4,16 @@
 	<meta charset='utf-8'>
 	<meta name='viewport' content='width=device-width, user-scalable=no'>
 	<title>Pali Lookup Test</title>
+  <link rel='stylesheet' href='lookup.css'>
 
-	<link href='http://fonts.googleapis.com/css?family=Amatic+SC:400,700' rel='stylesheet' type='text/css'>
-	<link rel='stylesheet' href='main.css'>
 </head>
 
 <body>
-	<header>
+	<header style="border-bottom: 1px solid grey">
 		<h1>Pali Lookup Test</h1>
-		<p>Built with ES6/ES7, using babel, rollup and gobble</p>
+		<p><em>Built with ES6/ES7, using babel, rollup and gobble</em></p>
 	</header>
-  
+
   <div id="text" lang="pi">
   <section class="sutta" id="sn4.16">
   <article>
@@ -72,7 +71,7 @@
   <a class="next" title="SN 4.17:  " href="/pi/sn4.17" data-prefetch="1">▶</a>
   </div>
   </div>
-
-	<script src='app.js'></script>
+  <script src="/vendor/jquery-2.1.4.min.js"></script>
+	<script src='lookup-utility.js'></script>
 </body>
 </html>
