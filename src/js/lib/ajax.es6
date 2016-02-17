@@ -1,5 +1,5 @@
-export default function ajax(url, data, callback, type) {
-  return new Promise(function(resolve, reject, progress) {
+export default function ajax(url, data, callback, type, progressCallback) {
+  return new Promise(function(resolve, reject) {
     var data_array, data_string, idx, req, value;
     if (data == null) {
       data = {};
@@ -18,7 +18,8 @@ export default function ajax(url, data, callback, type) {
     }
     data_string = data_array.join("&");
     req = new XMLHttpRequest();
-    req.open(type, url, false);
+    req.onprogress = progressCallback;
+    req.open(type, url, true);
     req.setRequestHeader("Content-type", "application/x-www-form-urlencoded");
     req.onload = function() {
       if (this.status >= 200 && this.status < 300) {
@@ -41,12 +42,7 @@ export default function ajax(url, data, callback, type) {
       })
     }
 
-    req.onprogress = function() {
-      progress({
-        loaded: this.loaded,
-        total: this.total
-      })
-    }
+
     req.send(data_string);
     return req;
   })

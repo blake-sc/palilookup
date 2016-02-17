@@ -37,12 +37,17 @@ async function initDexie(dbname, dataFile, glossaryFile) {
   if (count == 0) {
     var loadGlossaryPromise = loadGlossaryFile(glossaryFile); //Not await on purpose - run in parallel
     self.postMessage({'progress': 'fetching data'});
-    let data = await ajax(dataFile, {}, null, 'GET');
-    self.postMessage({'progress': 'populating database'});
+    let dataPromise = ajax(dataFile, {}, null, 'GET', sendDownloadProgress);
+    let data = await dataPromise;
+
     await populateDatabase(db, data);
     await loadGlossaryPromise;
   }
   self.postMessage({'progress': 'ready'});
+}
+
+function sendDownloadProgress(e) {
+  self.postMessage({progress: `downloaded ${Math.ceil(e.loaded / 1000000)}MB`});
 }
 
 async function loadGlossaryFile(glossaryFile) {
@@ -57,14 +62,10 @@ function makeGlossaryEntryId(entry) {
 }
 
 async function loadGlossaryData(data){
-    console.log({data});
-  console.log(`Loading ${data.length} entries into Glossary`);
+    //console.log({data});
+  //console.log(`Loading ${data.length} entries into Glossary`);
   // First remove all old system entries
-  await db.transaction('rw', db.glossary, () => {
-    db.glossary.where('origin').equals('system').each(entry => {
-      db.glossary.delete(entry.term);
-    })
-  });
+  await removeGlossaryEntries({origin: 'system'});
   // Now load new system entries
   await db.transaction('rw', db.glossary, () => {
     for (let [term, gloss, context]  of data) {
@@ -88,7 +89,35 @@ async function addGlossaryEntry(entry) {
   return {'status': 'success'}
 }
 
-async function getGlossaryEntries({term, terms, user}) {
+async function addGlossaryEntries({entries, origin}) {
+  if (!origin) {
+    origin = 'user';
+  }
+  await db.transaction('rw', db.glossary, () => {
+    for (entry of entries) {
+      if (!entry.origin) {
+        entry.origin = origin;
+      }
+      entry.id = makeGlossaryEntryId(entry);
+      db.glossary.put(entry);
+    }
+  })
+}
+
+async function removeGlossaryEntries({origin}) {
+  console.log('removing entries')
+  let deletedCount = 0;
+  await db.transaction('rw', db.glossary, () => {
+    db.glossary.where('origin').equals(origin).each(entry => {
+      console.log('deleting entry', entry);
+      db.glossary.delete(entry.id);
+      deletedCount += 1;
+    })
+  });
+  return {deletedCount}
+}
+
+async function getGlossaryEntries({term, terms, origin}) {
   if (term) {
     terms = [term];
   }
@@ -109,16 +138,23 @@ async function getGlossaryEntries({term, terms, user}) {
   }
 
   let count = await db.glossary.count();
-  console.log(`Glossary has ${count} entries`);
-  console.log(`Searching glossary for ${JSON.stringify({terms, conjugated})}`);
+  //console.log(`Glossary has ${count} entries`);
+  //console.log(`Searching glossary for ${JSON.stringify({terms, conjugated})}`);
   let clauses = db.glossary.where('term').anyOf(terms);
-  if (user) {
-    clauses = clauses.where('user').equals(user);
+  if (origin) {
+    clauses = clauses.where('origin').equals(origin);
   }
   let matches = await clauses.toArray();
   let conjugatedMatches = await db.glossary.where('term').anyOf(conjugated).toArray();
   // Exact matches come first, followed by
+  out = [...matches, ...conjugatedMatches];
+  //console.log({matches, conjugatedMatches, out});
   return [...matches, ...conjugatedMatches]
+}
+
+async function getAllGlossaryEntries({origin}) {
+  let result = await db.glossary.where('origin').equals(origin).toArray();
+  return result
 }
 
 async function populateDatabase(db, data) {
@@ -188,7 +224,7 @@ async function getEntry({term}) {
   return null;
 }
 
-async function getAndRankMatches({term, terms, indeclinables, conjugated, excludeFuzzy}) {
+async function getAndRankMatches({term, terms, priorityTerms, indeclinables, conjugated, excludeFuzzy}) {
   if (!terms && term) {
     terms = [term];
   }
@@ -203,6 +239,10 @@ async function getAndRankMatches({term, terms, indeclinables, conjugated, exclud
 
   if (!conjugated) {
     conjugated = [];
+  }
+  //console.log({priorityTerms});
+  if (!priorityTerms) {
+    priorityTerms = [];
   }
 
   let matchingTerms = await getMatchingTerms(terms);
@@ -220,7 +260,8 @@ async function getAndRankMatches({term, terms, indeclinables, conjugated, exclud
   }
 
   console.log({matchingTerms, matchingTermsIndeclinable, matchingTermsFolded, matchingTermsConjugated, matchingTermsConjugatedFolded, matchingTermsFuzzy})
-  let allMatchingTerms = new Set([...matchingTerms,
+  let allMatchingTerms = new Set([...priorityTerms,
+                           ...matchingTerms,
                            ...matchingTermsIndeclinable,
                            ...matchingTermsFolded,
                            ...matchingTermsConjugated,
@@ -229,11 +270,15 @@ async function getAndRankMatches({term, terms, indeclinables, conjugated, exclud
   let scores = {};
   for (term of allMatchingTerms) {
     let score = 0;
+    let priorityTermsIndex = priorityTerms.indexOf(term);
+    if (priorityTermsIndex != -1) {
+      score += 5 + 1 / (1 + priorityTermsIndex);
+    }
     if (matchingTerms.has(term)) {
       score += 1;
     }
     else if (matchingTermsFolded.has(term)) {
-      score += 0.25;
+      score += 0.5;
     }
 
     if (matchingTermsIndeclinable.has(term)) {
@@ -243,7 +288,7 @@ async function getAndRankMatches({term, terms, indeclinables, conjugated, exclud
     if (matchingTermsConjugated.has(term)) {
       score += 1;
     } else if (matchingTermsConjugatedFolded.has(term)) {
-      score += 0.25;
+      score += 0.5;
     }
 
     if (matchingTermsFuzzy.has(term)) {
@@ -335,6 +380,8 @@ async function getMatchingTermsFuzzy(terms) {
   return results;
 }
 
+
+
 var examples = {
   init: {
     fromLang: "pi",
@@ -381,37 +428,50 @@ async function messageHandler(message) {
       return {status: 'success'}
     }
 
+    let result = null;
+
     if ('store' in message) {
       await db.user.put(message.store);
-      return {status: 'success'}
+      result = {status: 'success'}
     }
 
-    if ('retrieve' in message) {
-      let result = await db.user.get(message.retrieve.key);
-      return result
+    else if ('retrieve' in message) {
+      result = await db.user.get(message.retrieve.key);
     }
 
-    if ('rank' in message) {
-      let result = await getAndRankMatches(message.rank);
-      return result
+    else if ('rank' in message) {
+      result = await getAndRankMatches(message.rank);
     }
 
-    if ('getEntry' in message) {
-      let result = await getEntry(message.getEntry);
-      return result
+    else if ('getEntry' in message) {
+      result = await getEntry(message.getEntry);
     }
 
-    if ('addGlossaryEntry' in message) {
-      let result = await addGlossaryEntry(message.addGlossaryEntry);
-      return result
+    else if ('getGlossaryEntries' in message) {
+      result = await getGlossaryEntries(message.getGlossaryEntries);
     }
 
-    if ('getGlossaryEntries' in message) {
-      let result = await getGlossaryEntries(message.getGlossaryEntries);
-      return result
+    else if ('getAllGlossaryEntries' in message){
+      result = await getAllGlossaryEntries(message.getAllGlossaryEntries);
     }
 
-    throw new Error('Message invalid, no action found: ' + JSON.stringify(message));
+    else if ('addGlossaryEntry' in message) {
+      result = await addGlossaryEntry(message.addGlossaryEntry);
+    }
+
+    else if ('addGlossaryEntries' in message) {
+      result = await addGlossaryEntries(message.addGlossaryEntries);
+    }
+
+    else if ('removeGlossaryEntries' in message) {
+      result = await removeGlossaryEntries(message.removeGlossaryEntries);
+    }
+
+    else {
+      throw new Error('Message invalid, no action found: ' + JSON.stringify(message));
+    }
+
+    return result
 }
 
 setMessageHandler(self, messageHandler);

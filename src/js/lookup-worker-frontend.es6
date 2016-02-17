@@ -45,7 +45,8 @@ export class LookupWorker {
     if (!key) {
       throw new TypeError('Message to be stored must define key');
     }
-    return this.postMesasge({store: {key, value}});
+    //console.log('storing', {key, value})
+    return this.postMessage({store: {key, value}});
   }
 
   retrieve(key) {
@@ -53,6 +54,7 @@ export class LookupWorker {
     if (!key) {
       throw new TypeError('key must be defined and not falsely')
     }
+
     return this.postMessage({retrieve: {key}});
   }
 
@@ -63,15 +65,12 @@ export class LookupWorker {
     return this.postMessage({getEntry: {term}});
   }
 
-  rank({term, terms, conjugated}) {
+  rank(query) {
+    let {term, terms, conjugated} = query;
     if (!term && (!terms || terms.length == 0)) {
       throw new TypeError('either term or terms must be defined');
     }
-    return this.postMessage({rank: {term, terms, conjugated}});
-  }
-
-  addGlossaryEntry(entry) {
-    return this.postMessage({addGlossaryEntry: entry});
+    return this.postMessage({rank: query});
   }
 
   getGlossaryEntries({term, terms, exact}) {
@@ -86,4 +85,22 @@ export class LookupWorker {
     }
     return this.postMessage({getGlossaryEntries: {term, terms, exact}})
   }
+
+  getAllGlossaryEntries({origin}) {
+    return this.postMessage({getAllGlossaryEntries: {origin}})
+  }
+
+  addGlossaryEntry(entry) {
+    return this.postMessage({addGlossaryEntry: entry});
+  }
+
+  addGlossaryEntries({entries, origin}) {
+    return this.postMessage({addGlossaryEntries: {entries, origin}});
+  }
+
+  removeGlossaryEntries({origin}) {
+    return this.postMessage({removeGlossaryEntries: {origin}});
+  }
+
+
 }

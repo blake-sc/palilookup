@@ -39,15 +39,15 @@ module.exports = gobble([
     gobble('src/js')
       .transform('rollup', Object.assign(rollupSettings(),
                                          {
-                                           entry: 'lookup-utility.es6',
-                                           dest: 'lookup-utility.js'
+                                           entry: 'lookup.es6',
+                                           dest: 'lookup-1.2.js'
                                          })
       ),//.transform('uglifyjs'),
       gobble('src/js')
         .transform('rollup', Object.assign(rollupSettings(),
                                            {
                                              entry: 'lookup-worker-backend.es6',
-                                             dest: 'lookup-worker.js'
+                                             dest: 'lookup-worker-1.2.js'
                                            })
         )//.transform('uglifyjs')
     ]);

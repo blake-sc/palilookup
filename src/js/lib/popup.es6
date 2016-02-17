@@ -1,3 +1,5 @@
+import {getEmPixelSize} from './em-calculator.es6';
+
 var isPopupHover = false,
 popups = new Set();
 popupToElement = new Map();
@@ -5,10 +7,9 @@ popupToElement = new Map();
 export class Popup {
   // parent can be an element or Popup instance
   // location can be an offset or element
-  constructor({location, parent, content, protect, popupClassName}) {
-
-    this.location = location || $('<span style="position: absolute"/>').prependTo(parent.element || parent).data('deleteMe', true);
-    this.parent = parent;
+  constructor({absoluteLocation, fixedLocation, parent, content, protect, popupClassName}) {
+    this.absoluteLocation = absoluteLocation;
+    this.fixedLocation = fixedLocation;
     this.isAbsolute = false;
     this.markupTarget = $('main, body').first();
     this.entered = false;
@@ -19,19 +20,25 @@ export class Popup {
     this.popupClassName = popupClassName || Popup.getDefaultClassName();
     this.mustDie = false;
 
-    popups.add(this);
-    if (parent.nodeType == 1) {
-      popupToElement.set(this, parent);
+    if (parent) {
+      if (parent instanceof Popup) {
+        this.parentPopup = parent;
+        parent.childrenPopups.push(this);
+      } else if (parent.nodeType == 1) {
+        this.parentElement = parent;
+      }
     }
 
-    $(this.parent).addClass(`.${this.popupClassName}-parent`);
-    if (parent && (parent instanceof Popup)) {
-      parent.childrenPopups.push(this);
+    popups.add(this);
+    if (this.parentElement) {
+      popupToElement.set(this, this.parentElement);
+      $(this.parentElement).addClass(`.${this.popupClassName}-parent`);
     }
 
     this.element = $('<div/>').addClass(this.popupClassName).append(content);
 
     this.align();
+
     this.element.mouseenter(event => {
       this.isPopupHover = true
     });
@@ -42,16 +49,12 @@ export class Popup {
                                         this.element.stop().fadeIn(0)
                                       }
                                     });
+    this.element.mouseleave(event => {this.isPopupHover = false});
 
     setTimeout( () => {
       this.removeIfNeeded();
       this.element.mouseleave( () => this.removeIfNeeded());
     }, 1500);
-
-    if ($(this.location).data('deleteMe')) {
-      this.location.remove();
-      this.location = null;
-    }
 
     return this;
   }
@@ -68,7 +71,7 @@ export class Popup {
 
   removeNow() {
     popups.delete(this);
-    $(this.parent).removeClass(`.${this.popupClassName}-parent`);
+    $(this.parentElement).removeClass(`.${this.popupClassName}-parent`);
     this.element.remove();
     let element = popupToElement[this];
     popupToElement.delete(this);
@@ -78,11 +81,11 @@ export class Popup {
   }
 
   isHover() {
-    if ($(this.element).is(':hover')) {
+    if (this.isPopupHover) {
       return true
     }
-    if (!(this.parent instanceof Popup)) {
-      if ($(this.parent).is(':hover')) {
+    if (this.parentElement) {
+      if ($(this.parentElement).is(':hover')) {
         return true;
       }
     }
@@ -115,20 +118,31 @@ export class Popup {
   }
 
   align() {
-    var location = this.location,
-        element = this.element;
+    let offset = null,
+        element = this.element,
+        location = $(document.body);
+
     element.removeAttr('style');
-    if ('left' in location || 'top' in location) {
-      offset = location
-      offset.left = offset.left || 0
-      offset.top = offset.top || 0
-      this.location = document.body
-      this.isAbsolute = true
-    } else {
-      location = $(location)
-      offset = location.offset()
+    if (this.fixedLocation) {
+      offset = this.fixedLocation;
+      location = document.body;
+      isFixed = true;
+      this.element.css({position: 'fixed'})
+    } else if (this.absoluteLocation) {
+      offset = this.absoluteLocation;
+      offset.left = offset.left || 0;
+      offset.top = offset.top || 0;
+      location = document.body;
+      isAbsolute = true;
+    } else if (this.parentElement) {
+      $(this.parentElement).css({display: 'inline-block'});
+      let popupAnchor = $('<span style="display: inline-block; position: relative; margin-top: -1em"></span>').prependTo(this.parentElement);
+      offset = popupAnchor.offset();
+      let em = getEmPixelSize(popupAnchor[0]);
+      offset.top -= 1.0 * em;
+      popupAnchor.remove();
+      $(this.parentElement).css({display: ''});
     }
-    this.offset = offset;
 
     //We need to measure the doc width now.
     var docWidth = $(document).width()
@@ -142,7 +156,7 @@ export class Popup {
     //The reason for the duplicity is because if you realize the
     //actual popup and measure that, then any transition effects
     //cause it to zip from it's original position...
-    if (!this.isAbsolute) {
+    if (!this.absoluteLocation && !this.fixedLocation) {
       offset.top += location.innerHeight() - popupHeight - location.outerHeight();
       offset.left -= popupWidth / 2;
     }
@@ -156,7 +170,13 @@ export class Popup {
     {
       offset.left = docWidth - (popupWidth + 5);
     }
-    element.offset(offset)
+
+    if (this.fixedLocation) {
+      element.css({top: offset.top, left: offset.left});
+    }
+    else {
+      element.offset(offset)
+    }
     this.markupTarget.append(element);
     if (offset.top < 0) {
       element.height(element.height() + offset.top);
@@ -191,10 +211,17 @@ export class Popup {
   }
 
   static hasPopup(element) {
-    for (value of popupToElement.values()) {
-      if (value == element) return true;
+    for (element of popupToElement.values()) {
+      if (element == element) return true;
     }
     return false;
+  }
+
+  static getPopup(element) {
+    for ([popup, element] of popupToElement.entries()) {
+      if (element == element) return popup;
+    }
+    return null;
   }
 
   static getDefaultClassName() {

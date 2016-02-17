@@ -6,6 +6,8 @@ import * as pi from './lang/pi.es6';
 import {LookupWorker} from './lookup-worker-frontend.es6';
 import {textNodes} from './lib/text-nodes.es6';
 import {sleep} from './lib/sleep.es6';
+import {getEmPixelSize} from './lib/em-calculator.es6';
+import timeStamp from './lib/timestamp';
 
 let defaultSources =  {
     cped: {
@@ -27,12 +29,13 @@ let defaultSources =  {
 }
 
 
-class LookupUtility {
-  constructor({selector, main, popupClass, lookupWorkerSrc, sources, fromLang, toLang, dataFile, glossaryFile}) {
+export default class LookupUtility {
+  constructor({selectorClass, main, popupClass, lookupWorkerSrc, sources, fromLang, toLang, dataFile, glossaryFile, includeSettings}) {
     this.popups = [];
-    this.popupClass = popupClass;
+    this.popupClass = popupClass || Popup;
+    this.includeSettings = includeSettings === false ? false : true;
 
-    this.selector = selector;
+    this.selectorClass = selectorClass;
     this.main = $(main || this.getDefaultMain());
     this.lookupWorkerSrc = lookupWorkerSrc || 'lookup-worker.js';
 
@@ -40,32 +43,44 @@ class LookupUtility {
     this.toLang = toLang;
 
     this.sources = sources || defaultSources;
+    this.markupGenerator = new MarkupGenerator({selectorClass});
+    this.addHandlers({selectorClass, main});
+    this.ready = this.initWorker({fromLang, toLang, dataFile, glossaryFile}).then( () => {
+      this.glossary = new Glossary({lookupUtility: this});
+      this.termBreakCache = new TermBreakCache({lookupWorker: this.lookupWorker});
+      this.termBreakCache.loadFromServer();
 
-    this.addHandlers({selector, main});
-    this.initWorker({fromLang, toLang, dataFile, glossaryFile});
+      this.enabled = true;
+    })
+
+  }
+
+  makeLoadingPopup() {
+    this.loadingPopup = new LoadingPopup({lookupUtility: this});
+    return this.loadingPopup;
+
   }
 
   progressHandler(event) {
     if (event.data.progress) {
-      console.log('Progress: ' + event.data.progress);
+      //console.log('Progress: ' + event.data.progress);
     }
   }
 
-  initWorker({fromLang, toLang, dataFile, glossaryFile}) {
-    this.lookupWorker = new LookupWorker(this.lookupWorkerSrc);
-    this.glossary = new Glossary(this.lookupWorker);
-    this.termBreakCache = new TermBreakCache(this.lookupWorker);
-    this.ready = this.lookupWorker.init({fromLang, toLang, dataFile, glossaryFile});
-    this.ready.then(()=>this.enabled = true);
+  async initWorker({fromLang, toLang, dataFile, glossaryFile}) {
+    let lookupWorker = this.lookupWorker = new LookupWorker(this.lookupWorkerSrc);
+    return lookupWorker.init({fromLang, toLang, dataFile, glossaryFile});
+
   }
 
   mouseoverHandler(event) {
     if (!this.enabled) return
     var target = $(event.target);
+    ////console.log('mouseover', target);
     setTimeout(()=> {
       if (target.is(':hover')) {
         Popup.removeAll({removeProtected: true});
-        this.lookup({node: event.target, includeGlossary: true});
+        this.lookup({node: event.target, includeGlossary: true, useTermBreak: true});
       }
     }, 50)
   }
@@ -80,9 +95,9 @@ class LookupUtility {
     return $('main, body').first();
   }
 
-  addHandlers({selector}) {
-    this.main.on('click.lookup', selector, e => this.clickHandler(e));
-    this.main.on('mouseover.lookup', selector, e => this.mouseoverHandler(e));
+  addHandlers({selectorClass}) {
+    this.main.on('click.lookup', `.${selectorClass}`, e => this.clickHandler(e));
+    this.main.on('mouseover.lookup', `.${selectorClass}`, e => this.mouseoverHandler(e));
   }
 
   removeHandlers({main}) {
@@ -95,28 +110,43 @@ class LookupUtility {
 
   getTerm(node) {
       var term = node.childNodes[0].nodeValue;
-      if (!term || term.match(/^\s+$/)) return null
-      return term
+      if (!term || term.match(/^\s+$/)) return null;
+      return term.toLowerCase();
   }
 
-  async lookup({node, term, indeclinables, parent, includeGlossary, preFn}) {
-    if (Popup.hasPopup(node) && !indeclinables) {
-      console.log('Already has popup');
+  async lookup({node,
+                term,
+                indeclinables,
+                parent,
+                absoluteLocation,
+                useTermBreak,
+                includeGlossary,
+                includeSettings,
+                excludeFuzzy,
+                preFn}) {
+
+    if ($(node).hasClass('lookup-in-progress') && !indeclinables) {
+      ////console.log('Already has popup', Popup.getPopup(node));
       return null;
     }
+    $(node).addClass('lookup-in-progress');
     if (!term) {
       term = this.getTerm(node);
-      console.log('term is null');
+      ////console.log('term is null');
       if (term == null) return
     }
     let terms = [term];
+    let termBreak = undefined;
+    if (useTermBreak) {
+      termBreak = this.termBreakCache.retrieve(term);
+    }
+    ////console.log({termBreak})
 
-    console.log('Lookup: ' + term);
-    Popup.removeAll();
-    var results = await this.lookupWorker.rank({terms, indeclinables});
+    ////console.log('Lookup: ' + term);
+    var results = await this.lookupWorker.rank({terms, indeclinables, priorityTerms: termBreak, excludeFuzzy});
     var contentHtml = `<table class="pali">
     ${results.map(hit => `
-      <tr${hit.score < 1 ? ' class="poor-match"' : ''}>
+      <tr${hit.score < 1 ? ' class="poor-match hide"' : ''}>
         <td class="term">${hit.term}</td>
         <td class="meaning">
           <ul>
@@ -131,7 +161,7 @@ class LookupUtility {
         </td>
       </tr>`).join('')}
     </table>`;
-
+    contentHtml = contentHtml.replace(/\s*\n\s*/g, '\n');
     var content = $(contentHtml);
     this.massageEntryContent(content);
 
@@ -141,17 +171,21 @@ class LookupUtility {
       .find('td')
       .append(this.glossary.createInputBar(term));
     }
-    this.addUnhideBar(content);
+
     if (preFn) {
       preFn(content);
     }
 
-    var popup = new Popup({
+    var popup = new Popup({absoluteLocation,
                            parent: node,
                            content: content,
-                           protected: false});
+                           protected: false,
+                           includeSettings});
 
     if (popup) {
+      if (this.includeSettings && includeSettings !== false) {
+        this.addSettings({popup});
+      }
       popup.element.find('li').addClass('expandable');
       popup.element.on('click', 'li', (event) => {
         $(this).addClass('clicked');
@@ -164,8 +198,98 @@ class LookupUtility {
       if (popup.element.tipsy) {
         popup.element.find('[title]').removeAttr('title');
       }
+      this.addUnhideBar({popup});
     }
+    popup.align();
     $(node).removeClass('lookup-in-progress');
+  }
+
+  addSettings({popup}) {
+    //$(popup.element).find('table').prepend('<thead><tr><td colspan=0><div class="settings-wrap"><div title="Lookup Settings" class="settings-cog">\u2699</div></div></td></tr></thead>');
+
+    if ($(popup.element).find('tbody tr').length == 0){
+      return
+    }
+
+    $('<div class="settings-wrap"><div title="Lookup Settings" class="settings-cog">\u2699</div></div>')
+      .prependTo(popup.element)
+      .on('click', (e) => this.makeSettingsPopup());
+
+
+
+  }
+
+  makeSettingsPopup() {
+    let content = $(`
+      <aside class="settings">
+        <div class="settings-darkness"></div>
+        <div class="inner">
+          <h3>Settings</h3>
+<ul>
+
+          <li id="download-data"><label>Download User Data <button type="button" id="get-download-link">Get Link</button></label>
+
+          <li id="upload-data"><label>Upload User Data <input type="file" id="upload-data-file" name="upload-data-file"/></label>
+
+          <li id="clear-data"><label>Clear User Data <label>(I'm sure <input type="checkbox" id="clear-sure" name="clear-sure">)</label> <button type="button" id="clear-user-data" disabled=disabled>Boom</button></label>
+</ul>
+        </div>
+      </aside>`)
+    let popup = new Popup({fixedLocation: {left: '2em', top: '2em'}, content, protect: true})
+    popup.element.find('.settings-darkness').on('click', (e)=>popup.remove());
+    popup.element.css({'max-width': 'inherit'});
+    // Download using data URL
+    let getDownloadLink = popup.element.find('#get-download-link');
+    getDownloadLink.on('click', (e) => {
+      e.preventDefault();
+      this.dumpUserData().then( data => {
+        console.log(data);
+        let dataString = "text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(data));
+        let timestamp = timeStamp();
+        let filename = `lookup-user-data-${timestamp}.json`;
+        $(` <a href="data:${dataString}" download="${filename}">download as JSON</a>`)
+          .appendTo($('#download-data'));
+        getDownloadLink.attr('disabled', 'disabled');
+      })
+
+    })
+
+    // Boom (Clear data)
+    let clearSure = popup.element.find('#clear-sure');
+    let clearUserData = popup.element.find('#clear-user-data');
+    clearSure.on('change', (e) => {
+      console.log(clearSure.prop('checked'));
+      if (clearSure.prop('checked')) {
+        clearUserData.removeAttr('disabled');
+      } else {
+        clearUserData.attr('disabled', 'disabled');
+      }
+    })
+
+    clearUserData.on('click', (e) => {
+      e.preventDefault();
+      this.clearUserData();
+      setTimeout(() => clearUserData.attr('disabled', 'disabled'), 50);
+    })
+
+    // Upload data using File API
+
+    let uploadDataFile = popup.element.find('#upload-data-file');
+
+    uploadDataFile.on('change', (e) => {
+      let files = e.target.files;
+      let file = files[0];
+      if (!file) return
+
+      let reader = new FileReader();
+      reader.onload = () => {
+        let data = JSON.parse(reader.result);
+        this.loadUserData({data});
+        popup.element.find('#upload-data').append(' <i>… uploaded.</i>');
+        uploadDataFile.attr('disabled', 'disabled');
+      }
+      reader.readAsText(file);
+    })
   }
 
   makeSourceTag({source}) {
@@ -177,35 +301,40 @@ class LookupUtility {
     content.find('dd > p:first-child').contents().unwrap();
   }
 
-  addUnhideBar(table) {
-    var self = this,
-    hiddenCount = table.find('tr.hide').length;
-
+  addUnhideBar({popup}) {
+    let table = popup.element.find('table');
+    let hiddenCount = table.find('tr.hide td.term').length;
+    let totalCount = table.find('tr td.term').length;
+    ////console.log({hiddenCount, totalCount})
+    if (hiddenCount == totalCount) {
+      table.find('tr.hide').removeClass('hide');
+      return
+    }
     if (hiddenCount > 0) {
-      var string = hiddenCount == 1 ? ' fuzzy result…' : ' fuzzy results…',
-      tr = $('<tr><td colspan=2 class="unhide">' + hiddenCount + string + '</td></tr>')
-      .appendTo(table);
-      tr.one('click', function() {
+      let tr = $(`<tr><td colspan=3 class="unhide"><a style="width: 100%; display: inline-block;" title="Fuzzy results bear some resemblence but are less likely to be actually a correct match">${hiddenCount} ${hiddenCount == 1 ? ' fuzzy result…' : ' fuzzy results…'}</a></td></tr>`)
+              .appendTo(table);
+      popup.align();
+      tr.find('a').one('click', (event) => {
+        event.preventDefault();
         table.find('tr.hide')
-        .slice(0, hiddenCount == 5 ? 5 : 4)
-        .removeClass('hide');
+             .slice(0, hiddenCount == 5 ? 5 : 4)
+             .removeClass('hide');
         tr.remove();
-        self.addUnhideBar(table);
-        if (table.parent().length) {
-          table.parent().data('alignFn')();
-        }
-      });
+        this.addUnhideBar({popup});
+        popup.align();
+        popup.align();
+      })
     }
   }
 
   async retrieveEntry({term, source}) {
     let result = await this.lookupWorker.getEntry({term});
     if (!result) return null;
-    console.log({result})
+    ////console.log({result})
     for (entry of result.entries) {
-      console.log(entry.source, source);
+      ////console.log(entry.source, source);
       if (entry.source == source) {
-        console.log('Founding matching entry');
+        ////console.log('Founding matching entry');
         return entry
       }
     }
@@ -213,7 +342,7 @@ class LookupUtility {
   }
 
   expandEntry({entry, popup}) {
-    console.log('Expanding Entry', {entry, popup});
+    ////console.log('Expanding Entry', {entry, popup});
 
     var textField = $('<div class="popup-text-overlay"/>').html($(entry)[0].outerHTML),
     closeButton = $('<div class="popup-close-button">✖</div>').css('float', 'right');
@@ -243,7 +372,7 @@ class LookupUtility {
 
       this.retrieveEntry({term: term, source: source}).then(entry => {
         if (entry == null) return
-        console.log('Expanding entry', {entry, popup});
+        ////console.log('Expanding entry', {entry, popup});
         textField.remove();
         let content = $('<div class="content"/>').html(entry.html_content);
         this.massageEntryContent(content);
@@ -254,144 +383,180 @@ class LookupUtility {
   }
 
   sanitizeTerm(term) {
+    term = term.toLowerCase();
     if (this.fromLang == 'pi') {
       term = pi.sanitizeTerm(term);
     }
     return term
   }
 
-    decomposeMode(node) {
-      Popup.removeAll({removeProtected: true});
-        let term = this.getTerm(node);
-        let charRex = /./g;
-        term = this.sanitizeTerm(term);
-        if (this.fromLang == 'pi') {
-          charRex = pi.charRex;
-        }
-        if (!term) {
-          return
-        }
-
-        let content = $('<div class="decomposed"/>');
-
-        term.match(charRex).forEach(char => {
-            content.append($('<span class="letter"/>').text(char))
-        });
-        let em = Number(getComputedStyle(node, "").fontSize.match(/(\d*(\.\d*)?)px/)[1])
-        let pos = $(node).offset();
-        let popupAnchor = $('<span/>').prependTo(node);
-        let offset = popupAnchor.offset();
-        offset.top -= em / 3;
-        offset.left -= em / 2;
-        popupAnchor.remove()
-
-        var decomposePopup = new Popup({parent: node, location: offset, content: content, protect: true});
-        decomposePopup.element.on('mouseover click', '.letter', event => {
-            $('.letter.selected').removeClass('selected');
-            var letters = $(event.target).add($(event.target).nextAll());
-            letters.addClass('selected');
-            var out = letters.map( (i, e) => $(e).text())
-                             .get()
-                             .join('');
-            out = this.sanitizeTerm(out);
-            Popup.removeAll({exclude: decomposePopup});
-
-            let decomposed = this.decompose({term, charRex});
-            this.lookup({node: node,
-                         term: out,
-                         indeclinables: decomposed,
-                         parent: decomposePopup,
-                         preFn: content => {
-                             content.find('tr').each( (i, element) => {
-                                var tr = $(element),
-                                    td = $('<td class="accept">✓</td>'),
-                                    thisTerm = tr.children('.term').text();
-                                if ((this.termBreakCache.retrieve(term) || []).indexOf(thisTerm) != -1) {
-                                    td.addClass('accepted');
-                                }
-                                tr.append(td);
-                            })
-                            content.on('click', '.accept', event => {
-                              let target = $(event.target);
-                                var thisTerm = target.siblings('.term').text();
-                                if (target.hasClass('accepted')) {
-                                    target.removeClass('accepted');
-                                    this.termBreakCache.unstore(term, thisTerm);
-                                } else {
-                                    this.termBreakCache.store(term, thisTerm);
-                                    target.addClass('accepted');
-                                }
-                            });
-                         }
-                        })
-            return false
-        })
+  decomposeMode(node) {
+    Popup.removeAll({removeProtected: true});
+    let term = this.getTerm(node);
+    let charRex = /./g;
+    term = this.sanitizeTerm(term);
+    if (this.fromLang == 'pi') {
+      charRex = pi.charRex;
     }
-
-    decomposeVowels(term) {
-        var table = {
-                'a': ['a'],
-                'ā': ['ā', 'a'],
-                'i': ['i'],
-                'ī': ['ī', 'i'],
-                'u': ['u'],
-                'ū': ['ū', 'u'],
-                'e': ['e', 'a', 'i'],
-                'o': ['o', 'a', 'u']
-            },
-            firstChar = term[0],
-            lastChar = term.slice(-1),
-            terms = [];
-        if (table[firstChar]) {
-            table[firstChar].forEach(function(char) {
-                terms.push(char + term.slice(1));
-            })
-        } else {
-            terms.push(term);
-        }
-        terms2 = [];
-        if (table[lastChar]) {
-            terms.forEach(function(term) {
-                table[lastChar].forEach(function(char) {
-                    terms2.push(term.slice(0, -1) + char);
-                });
-            });
-        } else {
-            terms2 = terms;
-        }
-        return terms2;
-    }
-
-    decompose({term, charRex}) {
-        var out = [],
-            chars = term.match(charRex);
-
-        for (var j = chars.length - 1; j > 0; j--) {
-            subTerm = chars.slice(0, j).join('');
-            if (subTerm.length <= 2) continue
-            out = out.concat(this.decomposeVowels(subTerm));
-        }
-        return out;
-    }
-  }
-
-class TermBreakCache {
-  constructor(){
-    this.storage = {};
-    this.mapping = {};
-  }
-
-  updateMapping(key) {
-
-    if (key === undefined) {
-      _.each(this.storage, (value, key) => {
-        this.updateMapping(key);
-      });
+    if (!term) {
       return
     }
 
-    for (term of pi.conjugate(key)) {
-      this.mapping[term] = key;
+    let content = $('<div class="decomposed"/>');
+
+    term.match(charRex).forEach(char => {
+      content.append($('<span class="letter"/>').text(char))
+    });
+    let em = getEmPixelSize(node);
+    let pos = $(node).offset();
+    $(node).css({display: 'inline-block'})
+    let popupAnchor = $('<span class="popup-anchor" style="display: inline-block"/>').prependTo(node);
+    let offset = popupAnchor.offset();
+    offset.top -= 1.0 * em;
+    offset.left -= 1.0 * em;
+    popupAnchor.remove()
+    $(node).css({display: ''})
+
+
+    var decomposePopup = new Popup({parent: node, absoluteLocation: offset, content: content, protect: true});
+    ////console.log({decomposePopup, offset})
+    decomposePopup.element.on('mouseover click', '.letter', event => {
+      $('.letter.selected').removeClass('selected');
+      var letters = $(event.target).add($(event.target).nextAll());
+      letters.addClass('selected');
+      var out = letters.map( (i, e) => $(e).text())
+      .get()
+      .join('');
+      out = this.sanitizeTerm(out);
+      Popup.removeAll({exclude: decomposePopup});
+
+      let decomposed = this.decompose({term: out, charRex});
+      ////console.log({out, decomposed});
+      this.lookup({node: node,
+        term: out,
+        indeclinables: decomposed,
+        excludeFuzzy: true,
+        parent: decomposePopup,
+        includeSettings: false,
+        preFn: content => {
+          content.find('tr').each( (i, element) => {
+            var tr = $(element),
+            td = $('<td class="accept">✓</td>'),
+            thisTerm = tr.children('.term').text();
+            if ((this.termBreakCache.retrieve(term) || []).indexOf(thisTerm) != -1) {
+              td.addClass('accepted');
+            }
+            tr.append(td);
+          })
+          content.on('click', '.accept', event => {
+            let target = $(event.target);
+            var thisTerm = target.siblings('.term').text();
+            if (target.hasClass('accepted')) {
+              target.removeClass('accepted');
+              this.termBreakCache.unstore(term, thisTerm);
+            } else {
+              this.termBreakCache.store(term, thisTerm);
+              target.addClass('accepted');
+            }
+          });
+        }
+      })
+      return false
+    })
+  }
+
+  decomposeVowels(term) {
+    var table = {
+      'a': ['a'],
+      'ā': ['ā', 'a'],
+      'i': ['i'],
+      'ī': ['ī', 'i'],
+      'u': ['u'],
+      'ū': ['ū', 'u'],
+      'e': ['e', 'a', 'i'],
+      'o': ['o', 'a', 'u']
+    },
+    firstChar = term[0],
+    lastChar = term.slice(-1),
+    terms = [];
+    if (table[firstChar]) {
+      table[firstChar].forEach(function(char) {
+        terms.push(char + term.slice(1));
+      })
+    } else {
+      terms.push(term);
+    }
+    terms2 = [];
+    if (table[lastChar]) {
+      terms.forEach(function(term) {
+        table[lastChar].forEach(function(char) {
+          terms2.push(term.slice(0, -1) + char);
+        });
+      });
+    } else {
+      terms2 = terms;
+    }
+    return terms2;
+  }
+
+  decompose({term, charRex}) {
+    var out = [],
+    chars = term.match(charRex);
+
+    for (var j = chars.length - 1; j > 0; j--) {
+      subTerm = chars.slice(0, j).join('');
+      if (subTerm.length <= 2) continue
+      out = out.concat(this.decomposeVowels(subTerm));
+    }
+    return out;
+  }
+
+  async dumpUserData() {
+    let glossaryData = await this.glossary.getAllUserEntries();
+    let termBreakData = this.termBreakCache.storage;
+
+    return {glossaryData, termBreakData}
+  }
+
+  async loadUserData({data}) {
+    this.termBreakCache.mergeEntries(data.termBreakData);
+    this.glossary.lookupWorker.addGlossaryEntries({entries: data.glossaryData, origin: 'user'})
+  }
+
+  async clearUserData() {
+    this.termBreakCache.storage = {};
+    this.termBreakCache.mapping = {};
+    this.termBreakCache.saveToServer();
+
+    this.glossary.lookupWorker.removeGlossaryEntries({origin: 'user'})
+  }
+
+}
+
+
+
+class TermBreakCache {
+  constructor({lookupWorker}){
+    this.storage = {};
+    this.mapping = {};
+    this.lookupWorker = lookupWorker;
+  }
+
+  mergeEntries(termBreakData) {
+    Object.assign(this.storage, termBreakData);
+    this.updateMapping();
+    this.saveToServer();
+  }
+
+  updateMapping(key) {
+    if (key === undefined) {
+      for (key of Object.keys(this.storage)) {
+        this.updateMapping(key);
+      }
+    } else {
+      for (term of pi.conjugate(key)) {
+        this.mapping[term] = key;
+      }
     }
   }
 
@@ -440,73 +605,75 @@ class TermBreakCache {
     delete this.storage[this.keyize(term)];
   }
 
-  async saveToServer() {
-    this.postMessage({'store': {key: 'termBreakCache.user', value: this.storage}})
-    sc.paliLookup.client.index({
-      index: 'pali-lookup',
-      type: 'compounds',
-      id: 'localuser',
-      body: {
-        data: this.storage
-      }
-    })
+  saveToServer() {
+    this.lookupWorker.store({key: 'termBreakCache.user', value: this.storage})
   }
 
   async loadFromServer() {
-    var self = this;
-    sc.paliLookup.client.get({
-      index: 'pali-lookup',
-      type: 'compounds',
-      id: 'localuser'
-    }).then(function(resp) {
-      self.storage = resp._source.data;
-      self.updateMapping();
-    }).fail(function() {
-      return
-    });
+    let result = await this.lookupWorker.retrieve({key: 'termBreakCache.user'});
+    if (result && result.value) {
+      this.storage = result.value;
+      this.updateMapping();
+    } else {
+      this.storage = {};
+    }
   }
 }
 
 class Glossary {
-  constructor(lookupWorker){
-    this.lookupWorker = lookupWorker;
+  constructor({lookupUtility}){
+    this.lookupUtility = lookupUtility;
+    this.lookupWorker = lookupUtility.lookupWorker;
   }
 
-  addEntry({term, context, gloss, comment}) {
-    this.lookupWorker.addGlossaryEntry({term, context, gloss, comment});
+  addEntry({term, context, gloss, comment, origin}) {
+    return this.lookupWorker.addGlossaryEntry({term, context, gloss, comment, origin});
   }
 
   getEntry(term) {
-    return this.lookupWorker.getGlossaryEntries({term: term});
+    return this.lookupWorker.getGlossaryEntries({term: term, origin: 'user'});
   }
-
-
 
   getEntries(terms) {
     return this.lookupWorker.getGlossaryEntries({terms: terms});
   }
 
+  getAllUserEntries() {
+    return this.lookupWorker.getAllGlossaryEntries({origin: 'user'});
+  }
+
   normalizeTerm(term) {
-    return term.toLowerCase();
+    return this.lookupUtility.sanitizeTerm(term);
   }
 
   createInputBar(term) {
-    var self = this;
     term = this.normalizeTerm(term);
     var form = $(`<form disabled class="add-glossary-entry">
-    <input name="term" value="${term}" required>
-    <input name="gloss" placeholder="gloss" value="">
-    <input name="context" placeholder="context" value="">
-    <input name="comment" placeholder="comment">
-    <input name="user" type="hidden" value="user">
+    <input name="term" title="term" value="${term}" required>
+    <input name="gloss" title="gloss" placeholder="gloss" value="">
+    <input name="context" title="context" placeholder="context" value="">
+    <input name="comment" title="comment" placeholder="comment">
+    <input name="origin" type="hidden" value="user">
     <button>+</button>
     </form>`);
 
-    this.getEntry(term).then( result => {
-      console.log({result});
-      if (result.length > 0) {
-        for (let [name, value] of result.entries()) {
-          form.find(`[name=${name}]`).val(value);
+    this.getEntry(term).then( results => {
+      console.log({form, results});
+      if (results.length > 0) {
+        for (result of results) {
+          //console.log({result});
+          if (result.origin == 'user') {
+            for (let name of Object.keys(result)) {
+              let e = form.find(`[name=${name}]`);
+              let value = result[name];
+              if (!value) {
+                e.attr('placeholder', null);
+              } else {
+                e.val(value);
+              }
+
+            }
+          }
         }
       }
     });
@@ -527,7 +694,7 @@ class Glossary {
       items.term = items.term.toLowerCase();
 
       form.children().attr('disabled', 'disabled');
-      self.addEntry(items).then( () => {
+      this.addEntry(items).then( () => {
         form.find('button').text('✓');
       });
     });
@@ -535,28 +702,26 @@ class Glossary {
   }
 }
 
-class MarkupGenerator {
-  constructor({alphaRex, wordRex, splitRex, lookupClassName}={}) {
+export class MarkupGenerator {
+  constructor({alphaRex, wordRex, splitRex, selectorClass}={}) {
     this.alphaRex = alphaRex || /([aiueokgcjtdnpbmyrlvshāīūṭḍṅṇṃñḷ])/i;
     this.wordRex = wordRex || /([aiueokgcjtdnpbmyrlvshāīūṭḍṅṇṃñḷ’­”]+)/ig;
     this.splitRex = splitRex || /(&[a-z]+;|<\??[a-z]+[^>]*>|[^  \n,.– —:;?!"'“‘\/\-]+)/i;
-    this.lookupClassName = lookupClassName || 'lookup';
-    this.markupOpen = this.getMarkupOpen();
-    this.markupClose = this.getMarkupClose();
+    this.selectorClass = selectorClass;
   }
 
   getMarkupOpen() {
-    return `<span class="${this.lookupClassName}">`;
+    return `<span class="${this.selectorClass}">`;
   }
   getMarkupClose() {
     return `</span>`
   }
 
-  shouldExclude(node) {
-    let parent = $(node).parent();
-    if (!parent.is(':lang(pi)')) return true;
-    if (parent.is('a')) {
-      if (parent.parents('h1,h2,h3,h4,h5').length == 0) {
+  shouldExclude(element) {
+    element = $(element);
+    if (!element.is(':lang(pi)')) return true;
+    if (element.is('a')) {
+      if (element.parents('h1,h2,h3,h4,h5').length == 0) {
         return false
       }
       return true
@@ -565,32 +730,56 @@ class MarkupGenerator {
   }
 
   wrapWords(node) {
-    let nodes = textNodes($(node));
-    for (let textNode of nodes) {
-      let markupOpen = this.markupOpen;
-      let markupClose = this.markupClose;
-      if (this.shouldExclude(textNode)) {
-        return
-      }
-
-      var text = textNode.nodeValue;
-      if (text.search(self.alphaRex) == -1) {
-        return
-      }
-
-      var newHtml = text.replace(this.wordRex, (m, word) => {
-        return markupOpen + word + markupClose;
-      })
-
-      var proxy = $('<span/>')[0];
-      textNode.parentNode.replaceChild(proxy, textNode);
-      proxy.outerHTML = newHtml;
+    if (node.jquery) {
+      node = node[0];
     }
+    let wrappedTextNodes = this.wrapTextNodes(node);
+    for (wrappedTextNode of wrappedTextNodes) {
+      this.breakTextNodeIntoWords(wrappedTextNode);
+    }
+  }
+
+  wrapTextNodes(node) {
+    let result = [];
+    let stack = [node];
+
+    while (stack.length) {
+      let currentNode = stack.pop();
+      if (currentNode.nodeType == document.ELEMENT_NODE) {
+        if (!this.shouldExclude(currentNode)) {
+          stack.push(...currentNode.childNodes);
+        }
+      } else if (currentNode.nodeType == document.TEXT_NODE) {
+        let parent = currentNode.parentNode;
+        let span = document.createElement('span');
+        parent.replaceChild(span, currentNode);
+        span.appendChild(currentNode);
+        result.push(span);
+      }
+    }
+    return result
+  }
+
+  breakTextNodeIntoWords(wrappedTextNode) {
+    let markupOpen = this.getMarkupOpen();
+    let markupClose = this.getMarkupClose();
+
+    var text = wrappedTextNode.firstChild.nodeValue;
+    if (text.search(self.alphaRex) == -1) {
+      return
+    }
+
+    var newHtml = text.replace(this.wordRex, (m, word) => {
+      if (word.search(/[0-9]/) != -1) return m;
+      return markupOpen + word + markupClose;
+    })
+
+    wrappedTextNode.innerHTML = newHtml;
 
   }
 
   startMarkupOnDemand({targetSelector, exclusions}) {
-    console.log({targetSelector})
+    ////console.log({targetSelector})
     $('body').on('mouseover.lookupMarkup', targetSelector, event => {
       let target = $(event.target);
       if (!target.is(targetSelector)) {
@@ -617,7 +806,7 @@ class MarkupGenerator {
 }
 
 class LoadingPopup {
-  constructor(lookupUtility){
+  constructor({lookupUtility}){
     this.lookupUtility = lookupUtility;
     this.popup = this.createPopup();
     this.progressElement = this.popup.element.find('#progress');
@@ -637,34 +826,3 @@ class LoadingPopup {
     return new Popup({location: {top: 40, left: 40}, content, parent: document.body});
   }
 }
-
-
-function smartInit(){
-
-  let mouseoverTarget = $('#text, main, body').first();
-  let targetSelector = 'p, h1, h2, h3, h4, h5';
-  let popupCssClassName = Popup.getDefaultClassName();
-  console.time('init');
-  lookupUtility = new LookupUtility({selector: `.lookup`,
-                                     popupClass: Popup,
-                                     fromLang: 'pi',
-                                     toLang: 'en'});
-  lookupUtility.ready.then(e=> console.timeEnd('init'));
-  markupGenerator = new MarkupGenerator();
-  markupGenerator.startMarkupOnDemand({targetSelector});
-
-  let loadingPopup = new LoadingPopup(lookupUtility);
-  loadingPopup.popup.element.hide();
-  setTimeout( ()=> {
-    if (lookupUtility.enabled) {
-
-    } else {
-      loadingPopup.popup.element.show();
-    }
-  }, 250);
-
-  return {lookupUtility, markupGenerator}
-}
-
-Object.assign(window, smartInit());
-window.lookupUtility.lookupWorker.setMessageHandler(function(e){if (e.data.progress) console.log(e.data.progress)});
